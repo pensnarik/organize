@@ -37,13 +37,15 @@ class App():
 
     def __init__(self):
         parser = argparse.ArgumentParser(description='Image organize tool')
-        parser.add_argument('--path', type=str, help='Path', required=True)
-        parser.add_argument('--dst', type=str, help='Destination', required=True)
+        parser.add_argument('--path', type=str, help='Path', required=False)
+        parser.add_argument('--dst', type=str, help='Destination', required=False)
         parser.add_argument('--test', action='store_true', default=False)
+        parser.add_argument('--file', type=str, help='Processes only a given file in debug mode')
         self.args = parser.parse_args()
 
-        if not os.path.exists(self.args.dst) or not os.path.isdir(self.args.dst):
-            raise Exception('Destination path does not exist')
+        if self.args.path is not None:
+            if not os.path.exists(self.args.dst) or not os.path.isdir(self.args.dst):
+                raise Exception('Destination path does not exist')
 
         logger.setLevel(logging.ERROR)
 
@@ -71,7 +73,10 @@ class App():
         for expr in expr_list.keys():
             m = re.search(expr, exif['DateTimeOriginal'])
             if m is not None:
-                d = dt.strptime(m.group(1), expr_list[expr])
+                try:
+                    d = dt.strptime(m.group(1), expr_list[expr])
+                except ValueError:
+                    continue
                 break
 
         return d
@@ -141,7 +146,7 @@ class App():
 
     def filter(self, filename):
         allowed_extensions = ['jpg', 'jpeg', 'mov', 'mp4', 'webm']
-        return any(filename.endswith(i) for i in allowed_extensions)
+        return any(filename.lower().endswith(i) for i in allowed_extensions)
 
     def get_next_file(self):
         for root, dirs, files in os.walk(self.args.path):
@@ -202,6 +207,13 @@ class App():
             logger.info('%s -> %s' % (filename, os.path.join(dst_full_path, basename)))
 
     def run(self):
+        if self.args.file is not None:
+            logger.setLevel(logging.DEBUG)
+            self.args.test = True
+            self.args.dst = '.'
+            self.process_file(self.args.file)
+            sys.exit(0)
+
         for file in self.get_next_file():
             try:
                 self.process_file(file)
