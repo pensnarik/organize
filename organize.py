@@ -70,15 +70,21 @@ class App():
         return result.replace('\u0000', '')
 
     def get_datetime_from_exif(self, exif):
-        if exif is None or 'DateTimeOriginal' not in exif.keys():
-            return None
+        if exif is None:
+            return (None, None)
+        if 'DateTimeOriginal' in exif.keys():
+            key = 'DateTimeOriginal'
+        elif 'DateTime' in exif.keys():
+            key = 'DateTime'
+        else:
+            return (None, None)
 
         expr_list = {'^(\d{4}:\d{2}:\d{2} \d{2}:\d{2}:\d{2})$': '%Y:%m:%d %H:%M:%S',
                      '^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})$': '%Y-%m-%d %H:%M:%S'}
         d = None
 
         for expr in expr_list.keys():
-            m = re.search(expr, exif['DateTimeOriginal'])
+            m = re.search(expr, exif[key])
             if m is not None:
                 try:
                     d = dt.strptime(m.group(1), expr_list[expr])
@@ -86,7 +92,7 @@ class App():
                     continue
                 break
 
-        return d
+        return (d, None)
 
     def get_datetime_from_filename(self, filename):
         basename = os.path.basename(filename)
@@ -99,17 +105,21 @@ class App():
                      '(?:VID|video)_(\d{8}_\d{6}).mp4': '%Y%m%d_%H%M%S',
                      '(\d{8}_\d{6}).(mp4)': '%Y%m%d_%H%M%S',
                      '(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}).jpg': '%Y-%m-%d_%H-%M-%S',
-                     'IMG\-(\d{8})-WA\d{4}.jpg': '%Y%m%d',
+                     'IMG\-(\d{8})-WA\d{4}.(?:jpg|jpeg)': '%Y%m%d',
                      'IMG_(\d{8}_\d{6})_(.*)?\d{13}.jpg': '%Y%m%d_%H%M%S',
                      'IMG_(\d{8}_\d{6})_HHT.jpg': '%Y%m%d_%H%M%S'
                      }
+        folder_expr = {'(\d{4}-\d{2}-\d{2})': '%Y-%m-%d',
+                       '(\d{2}-\d{2}-\d{4})': '%d-%m-%Y',
+                       '(\d{2}\.\d{2}\.\d{2})': '%d.%m.%y'}
+
         d = None
 
         # Unix epoch
         if re.match(r'^1(4|5)\d{11}\.(jpg|jpeg|mp4)$', basename):
             m = re.search('^(\d+)\.', basename)
             d = dt.fromtimestamp(int(m.group(1))/1000.0)
-            return d
+            return (d, None)
 
         for expr in expr_list.keys():
             m = re.search(expr, basename)
@@ -118,27 +128,35 @@ class App():
                     d = dt.strptime(m.group(1), expr_list[expr])
                 except ValueError:
                     raise FileProcessException("Invalid value for date and time in filename")
-                break
+                return (d, None)
 
-        return d
+        # Last resort - try to detect date from parents folder name
+        if d is None and len(filename.split('/')) > 1:
+            parent_folder = filename.split('/')[-2]
+            for expr in folder_expr.keys():
+                m = re.search(expr, parent_folder)
+                if m is not None:
+                    try:
+                        d = dt.strptime(m.group(1), folder_expr[expr])
+                    except ValueError:
+                        raise FileProcessException("Invalid value for date in folder name")
+                    # Add date to the file name in order not to lose
+                    # date/time inforation
+                    return (d, '%s-%s' % (d.strftime('%Y-%m-%d'), basename))
+
+        return (d, None)
 
     def get_datetime(self, filename, exif):
-        return self.get_datetime_from_exif(exif) or \
-               self.get_datetime_from_filename(filename)
+        date_, basename_ = self.get_datetime_from_exif(exif)
+        if date_ is None:
+            return self.get_datetime_from_filename(filename)
+        else:
+            return (date_, basename_)
 
     def get_device_name(self, fullname):
         return MAPPING.get(fullname, fullname)
 
-    def get_time_interval(self, filename, exif):
-        d = self.get_datetime_from_filename(filename)
-
-        if d is None:
-            # Try to get date and time from EXIF
-            d = self.get_datetime_from_exif(exif)
-
-        if d is None:
-            raise FileProcessException('Cannot get datetime')
-
+    def get_time_interval(self, d):
         i = '%s - %s' % (datetime.datetime(d.year, d.month, 1).strftime('%Y-%m-%d'),
                          datetime.datetime(d.year, d.month, monthrange(d.year, d.month)[1]).strftime('%Y-%m-%d'))
         return i
@@ -147,6 +165,7 @@ class App():
         try:
             image = Image.open(filename)
         except Exception:
+            logger.error("Could not open image")
             return {}
 
         if isinstance(image, JpegImageFile) and image._getexif() is not None:
@@ -164,7 +183,7 @@ class App():
         return exif
 
     def filter(self, filename):
-        allowed_extensions = ['jpg', 'jpeg', 'mov', 'mp4', 'webm']
+        allowed_extensions = ['jpg', 'jpeg', 'mov', 'mp4', 'webm', '3gp']
         return any(filename.lower().endswith(i) for i in allowed_extensions)
 
     def get_next_file(self):
@@ -184,9 +203,13 @@ class App():
             md5 = md5_hash(f.read()).hexdigest()
         return md5
 
-    def move_file(self, src, dst):
+    def move_file(self, src, dst, old_dst):
         def add_index_to_filename(filename, index):
             return re.sub('(\.)([^\.]+)$', r'__%0.4d.\2' % index, filename)
+
+        if os.path.exists(old_dst):
+            logger.info('RM %s' % old_dst)
+            os.remove(old_dst)
 
         if not os.path.exists(dst):
             # If dst doesn't exist just move src to dst
@@ -218,14 +241,19 @@ class App():
 
     def process_file(self, filename):
         exif = self.get_exif(filename)
-        datetime = self.get_datetime(filename, exif)
+        logger.debug(exif)
+        datetime, newbasename = self.get_datetime(filename, exif)
 
         if datetime is None:
             logger.error("Could not get date and time for file %s", filename)
             return
 
-        basename = os.path.basename(filename)
-        time_interval = self.get_time_interval(filename, exif)
+        if newbasename:
+            basename = newbasename
+        else:
+            basename = os.path.basename(filename)
+
+        time_interval = self.get_time_interval(datetime)
         description = self.get_path_description(filename ,exif)
         dst_path = '%s - %s' % (time_interval, description)
         dst_full_path = os.path.join(self.args.dst, datetime.strftime('%Y'), dst_path)
@@ -233,7 +261,9 @@ class App():
         if not os.path.exists(dst_full_path) and not self.args.test:
             os.makedirs(dst_full_path)
         if not self.args.test:
-            self.move_file(filename, os.path.join(dst_full_path, basename))
+            self.move_file(filename, os.path.join(dst_full_path, basename),
+                # FIXME: Remove old basename
+                os.path.join(dst_full_path, os.path.basename(filename)))
         else:
             logger.info('%s -> %s' % (filename, os.path.join(dst_full_path, basename)))
 
