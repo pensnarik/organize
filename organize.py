@@ -2,7 +2,7 @@
 
 """
 Scans the source folder for images and moves them into the destination folder
-accorind to their EXIFs and timestamps.
+accorinп to their EXIFs and timestamps.
 
 organize.py never overwrites existing files in --dst
 """
@@ -24,10 +24,13 @@ from PIL.JpegImagePlugin import JpegImageFile
 
 EXCLUDE_EXIF = ['MakerNote', 'UserComment']
 MAPPING = {'Xiaomi Redmi Note 7': 'Xiaomi', 'LG Electronics LG-H845': 'LG G5',
-           'Apple iPhone 4S': 'iPhone 4S', 'HighScreen Boost IIse': 'HighScreen',
-           'LG Electronics LG-D802': 'LG G2'}
+           'Apple iPhone': 'iPhone',
+           'Apple iPhone 4S': 'iPhone 4S',
+           'HighScreen Boost IIse': 'HighScreen',
+           'LG Electronics LG-D802': 'LG G2',
+           'Canon Canon EOS-1Ds Mark III': 'Canon EOS-1Ds Mark III',
+           'HTC HTC Desire 816 dual sim': 'HTC Desire'}
 
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("organize")
 
 class FileProcessException(Exception):
@@ -36,18 +39,22 @@ class FileProcessException(Exception):
 class App():
 
     def __init__(self):
+        logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+                            level=logging.INFO, stream=sys.stdout)
+
         parser = argparse.ArgumentParser(description='Image organize tool')
-        parser.add_argument('--path', type=str, help='Path', required=False)
+        parser.add_argument('--src', type=str, help='Path', required=False)
         parser.add_argument('--dst', type=str, help='Destination', required=False)
         parser.add_argument('--test', action='store_true', default=False)
         parser.add_argument('--file', type=str, help='Processes only a given file in debug mode')
         self.args = parser.parse_args()
 
-        if self.args.path is not None:
+        self.args.src = os.path.expanduser(self.args.src)
+        self.args.dst = os.path.expanduser(self.args.dst)        
+
+        if self.args.dst is not None:
             if not os.path.exists(self.args.dst) or not os.path.isdir(self.args.dst):
                 raise Exception('Destination path does not exist')
-
-        logger.setLevel(logging.ERROR)
 
     def exif2text(self, value):
         """ Helper function """
@@ -83,14 +90,26 @@ class App():
 
     def get_datetime_from_filename(self, filename):
         basename = os.path.basename(filename)
-        expr_list = {'IMG_(\d{8}_\d{6}).(jpg|jpeg)': '%Y%m%d_%H%M%S',
-                     '(\d{8}_\d{6}).(jpg|jpeg)': '%Y%m%d_%H%M%S',
-                     '(\d{8}_\d{6})_HDR.(jpg|jpeg)': '%Y%m%d_%H%M%S',
-                     'PANO_(\d{8}_\d{6}).(jpg|jpeg)': '%Y%m%d_%H%M%S',
-                     '(VID|video?)_(\d{8}_\d{6}).(mp4)': '%Y%m%d_%H%M%S',
+        # IMG_20160407_193522_HDR_1460046931206.jpg
+        expr_list = {'IMG_(\d{8}_\d{6}).(?:jpg|jpeg)': '%Y%m%d_%H%M%S',
+                     '(\d{8}_\d{6}).(?:jpg|jpeg)': '%Y%m%d_%H%M%S',
+                     '(\d{8}_\d{6})_HDR.(?:jpg|jpeg)': '%Y%m%d_%H%M%S',
+                     'IMG_(\d{8}_\d{6})_HDR_\d{13}.jpg': '%Y%m%d_%H%M%S',
+                     'PANO_(\d{8}_\d{6}).(?:jpg|jpeg)': '%Y%m%d_%H%M%S',
+                     '(?:VID|video)_(\d{8}_\d{6}).mp4': '%Y%m%d_%H%M%S',
                      '(\d{8}_\d{6}).(mp4)': '%Y%m%d_%H%M%S',
-                     '(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}).jpg': '%Y-%m-%d_%H-%M-%S'}
+                     '(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}).jpg': '%Y-%m-%d_%H-%M-%S',
+                     'IMG\-(\d{8})-WA\d{4}.jpg': '%Y%m%d',
+                     'IMG_(\d{8}_\d{6})_(.*)?\d{13}.jpg': '%Y%m%d_%H%M%S',
+                     'IMG_(\d{8}_\d{6})_HHT.jpg': '%Y%m%d_%H%M%S'
+                     }
         d = None
+
+        # Unix epoch
+        if re.match(r'^1(4|5)\d{11}\.(jpg|jpeg|mp4)$', basename):
+            m = re.search('^(\d+)\.', basename)
+            d = dt.fromtimestamp(int(m.group(1))/1000.0)
+            return d
 
         for expr in expr_list.keys():
             m = re.search(expr, basename)
@@ -149,7 +168,7 @@ class App():
         return any(filename.lower().endswith(i) for i in allowed_extensions)
 
     def get_next_file(self):
-        for root, dirs, files in os.walk(self.args.path):
+        for root, dirs, files in os.walk(self.args.src):
             for file in files:
                 if self.filter(os.path.join(root, file)):
                     yield os.path.join(root, file)
@@ -185,6 +204,18 @@ class App():
             logger.info('MV %s -> %s', src, add_index_to_filename(dst, i))
             shutil.move(src, add_index_to_filename(dst, i))
 
+    def get_path_description(self, filename, exif):
+        if self.get_make(exif) is not None and self.get_model(exif) is not None:
+            full_device_name = '%s %s' % (self.get_make(exif), self.get_model(exif))
+            return self.get_device_name(full_device_name)
+        elif exif == {} or exif is None:
+            if filename.split('.')[-1] in ('mov', 'mp4', 'webm'):
+                return 'Videos'
+            else:
+                return ''
+
+        return ''
+
     def process_file(self, filename):
         exif = self.get_exif(filename)
         datetime = self.get_datetime(filename, exif)
@@ -194,9 +225,9 @@ class App():
             return
 
         basename = os.path.basename(filename)
-        full_device_name = '%s %s' % (self.get_make(exif), self.get_model(exif))
         time_interval = self.get_time_interval(filename, exif)
-        dst_path = '%s - %s' % (time_interval, self.get_device_name(full_device_name))
+        description = self.get_path_description(filename ,exif)
+        dst_path = '%s - %s' % (time_interval, description)
         dst_full_path = os.path.join(self.args.dst, datetime.strftime('%Y'), dst_path)
 
         if not os.path.exists(dst_full_path) and not self.args.test:
