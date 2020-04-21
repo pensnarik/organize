@@ -12,6 +12,7 @@ import re
 import sys
 import shutil
 import logging
+from logging import FileHandler
 import argparse
 import datetime
 from hashlib import md5 as md5_hash
@@ -39,9 +40,7 @@ class FileProcessException(Exception):
 class App():
 
     def __init__(self):
-        logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-                            level=logging.INFO, stream=sys.stdout)
-
+        self.setup_logging()
         parser = argparse.ArgumentParser(description='Image organize tool')
         parser.add_argument('--src', type=str, help='Path', required=False)
         parser.add_argument('--dst', type=str, help='Destination', required=False)
@@ -55,6 +54,14 @@ class App():
         if self.args.dst is not None:
             if not os.path.exists(self.args.dst) or not os.path.isdir(self.args.dst):
                 raise Exception('Destination path does not exist')
+
+    def setup_logging(self):
+        logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+                            level=logging.INFO, stream=sys.stdout)
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        handler = FileHandler('organize-%s.log' % dt.now().strftime('%Y%m%d_%H%M%S'))
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
 
     def exif2text(self, value):
         """ Helper function """
@@ -203,13 +210,9 @@ class App():
             md5 = md5_hash(f.read()).hexdigest()
         return md5
 
-    def move_file(self, src, dst, old_dst):
+    def move_file(self, src, dst):
         def add_index_to_filename(filename, index):
             return re.sub('(\.)([^\.]+)$', r'__%0.4d.\2' % index, filename)
-
-        if os.path.exists(old_dst):
-            logger.info('RM %s' % old_dst)
-            os.remove(old_dst)
 
         if not os.path.exists(dst):
             # If dst doesn't exist just move src to dst
@@ -261,9 +264,7 @@ class App():
         if not os.path.exists(dst_full_path) and not self.args.test:
             os.makedirs(dst_full_path)
         if not self.args.test:
-            self.move_file(filename, os.path.join(dst_full_path, basename),
-                # FIXME: Remove old basename
-                os.path.join(dst_full_path, os.path.basename(filename)))
+            self.move_file(filename, os.path.join(dst_full_path, basename))
         else:
             logger.info('%s -> %s' % (filename, os.path.join(dst_full_path, basename)))
 
