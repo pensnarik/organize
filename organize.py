@@ -30,7 +30,8 @@ MAPPING = {'Xiaomi Redmi Note 7': 'Xiaomi', 'LG Electronics LG-H845': 'LG G5',
            'HighScreen Boost IIse': 'HighScreen',
            'LG Electronics LG-D802': 'LG G2',
            'Canon Canon EOS-1Ds Mark III': 'Canon EOS-1Ds Mark III',
-           'HTC HTC Desire 816 dual sim': 'HTC Desire'}
+           'HTC HTC Desire 816 dual sim': 'HTC Desire',
+           'OLYMPUS OPTICAL CO.,LTD C120,D380': 'Olympus C120'}
 
 logger = logging.getLogger("organize")
 
@@ -78,7 +79,7 @@ class App():
 
     def get_datetime_from_exif(self, exif):
         if exif is None:
-            return (None, None)
+            return None
         if 'DateTimeOriginal' in exif.keys():
             key = 'DateTimeOriginal'
         elif 'DateTime' in exif.keys():
@@ -99,7 +100,7 @@ class App():
                     continue
                 break
 
-        return (d, None)
+        return d
 
     def get_datetime_from_filename(self, filename):
         basename = os.path.basename(filename)
@@ -154,11 +155,11 @@ class App():
         return (d, None)
 
     def get_datetime(self, filename, exif):
-        date_, basename_ = self.get_datetime_from_exif(exif)
+        date_ = self.get_datetime_from_exif(exif)
         if date_ is None:
             return self.get_datetime_from_filename(filename)
         else:
-            return (date_, basename_)
+            return date_
 
     def get_device_name(self, fullname):
         return MAPPING.get(fullname, fullname)
@@ -242,19 +243,30 @@ class App():
 
         return ''
 
+    def get_new_basename(self, datetime, filename):
+        assert datetime is not None
+
+        ext = filename.split('.')[-1].lower()
+
+        if datetime.strftime('%H%M%S') == '000000':
+            time_part = re.sub(r'\(\d+\)$',
+                               '',
+                               '.'.join(os.path.basename(filename).split('.')[:-1]))
+        else:
+            time_part = datetime.strftime('%H%M%S')
+
+        return '%s_%s.%s' % (datetime.strftime('%Y%m%d'), time_part, ext)
+
     def process_file(self, filename):
         exif = self.get_exif(filename)
         logger.debug(exif)
-        datetime, newbasename = self.get_datetime(filename, exif)
+        datetime = self.get_datetime(filename, exif)
 
         if datetime is None:
             logger.error("Could not get date and time for file %s", filename)
             return
 
-        if newbasename:
-            basename = newbasename
-        else:
-            basename = os.path.basename(filename)
+        basename = self.get_new_basename(datetime, filename)
 
         time_interval = self.get_time_interval(datetime)
         description = self.get_path_description(filename ,exif)
