@@ -23,15 +23,19 @@ from PIL import Image, ExifTags
 from PIL.ExifTags import TAGS, GPSTAGS
 from PIL.JpegImagePlugin import JpegImageFile
 
+from organize.pcp_hash import get_file_hash, get_pcp_hash, get_file_size
+
 EXCLUDE_EXIF = ['MakerNote', 'UserComment']
 MAPPING = {'Xiaomi Redmi Note 7': 'Xiaomi', 'LG Electronics LG-H845': 'LG G5',
            'Apple iPhone': 'iPhone',
+           'Apple TIFFMODEL_IPHONE': 'iPhone',
            'Apple iPhone 4S': 'iPhone 4S',
            'HighScreen Boost IIse': 'HighScreen',
            'LG Electronics LG-D802': 'LG G2',
            'Canon Canon EOS-1Ds Mark III': 'Canon EOS-1Ds Mark III',
            'HTC HTC Desire 816 dual sim': 'HTC Desire',
-           'OLYMPUS OPTICAL CO.,LTD C120,D380': 'Olympus C120'}
+           'OLYMPUS OPTICAL CO.,LTD C120,D380': 'Olympus C120',
+           '2006-04-01 - 2006-04-30 - CASIO COMPUTER CO.,LTD  EX-S100': 'Casio EX-S100'}
 
 logger = logging.getLogger("organize")
 
@@ -85,7 +89,7 @@ class App():
         elif 'DateTime' in exif.keys():
             key = 'DateTime'
         else:
-            return (None, None)
+            return None
 
         expr_list = {'^(\d{4}:\d{2}:\d{2} \d{2}:\d{2}:\d{2})$': '%Y:%m:%d %H:%M:%S',
                      '^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})$': '%Y-%m-%d %H:%M:%S'}
@@ -127,7 +131,7 @@ class App():
         if re.match(r'^1(4|5)\d{11}\.(jpg|jpeg|mp4)$', basename):
             m = re.search('^(\d+)\.', basename)
             d = dt.fromtimestamp(int(m.group(1))/1000.0)
-            return (d, None)
+            return d
 
         for expr in expr_list.keys():
             m = re.search(expr, basename)
@@ -136,7 +140,7 @@ class App():
                     d = dt.strptime(m.group(1), expr_list[expr])
                 except ValueError:
                     raise FileProcessException("Invalid value for date and time in filename")
-                return (d, None)
+                return d
 
         # Last resort - try to detect date from parents folder name
         if d is None and len(filename.split('/')) > 1:
@@ -146,13 +150,17 @@ class App():
                 if m is not None:
                     try:
                         d = dt.strptime(m.group(1), folder_expr[expr])
+                        if d.year < 2001 or d.year > 2020:
+                            logger.error("Invalid year folder name: %s", parent_folder)
+                            return None
                     except ValueError:
                         raise FileProcessException("Invalid value for date in folder name")
                     # Add date to the file name in order not to lose
                     # date/time inforation
-                    return (d, '%s-%s' % (d.strftime('%Y-%m-%d'), basename))
+                    logger.info("Got date and time from parent's folder name")
+                    return d
 
-        return (d, None)
+        return d
 
     def get_datetime(self, filename, exif):
         date_ = self.get_datetime_from_exif(exif)
@@ -206,10 +214,49 @@ class App():
     def get_model(self, exif):
         return exif.get('Model') or exif.get('Camera model')
 
-    def get_file_hash(self, filename):
-        with open(filename, 'rb') as f:
-            md5 = md5_hash(f.read()).hexdigest()
-        return md5
+    def get_remove_candidate(self, file1, file2):
+        # Determines which file to delete based on file contents
+        logger.info("Choosing remove candidate between \"%s\" and \"%s\"", file1, file2)
+
+        os.system("jhead -q -autorot \"%s\"" % file1)
+        os.system("jhead -q -autorot \"%s\"" % file2)
+
+        pcp_hash1 = get_pcp_hash(file1)
+        pcp_hash2 = get_pcp_hash(file2)
+
+        if pcp_hash1 != pcp_hash2:
+            logger.info("Files have different PCP hashes, keeping both (%s != %s)", pcp_hash1,
+                        pcp_hash2)
+            return None
+
+        if pcp_hash1 == '0000000000000000':
+            return None
+
+        logger.info("Files PCP hashes are equal: %s", pcp_hash1)
+        # If images are equal, we keep the best one
+        im1 = Image.open(file1)
+        im2 = Image.open(file2)
+        w1, h1 = im1.size
+        w2, h2 = im2.size
+
+        if w1/h1 != w2/h2:
+            logger.warning("Images proportions are differ")
+            return None
+
+        if w1*h1 > w2*h2 and self.get_exif(file1) != {}:
+            logger.info('file1 is larger and contains EXIF')
+            return file2
+        elif w2*h2 > w1*h1 and self.get_exif(file2) != {}:
+            logger.info('file2 is larger and contains EXIF')
+            return file1
+        elif w1*h1 == w2*h2 and self.get_exif(file1) != {} and self.get_exif(file2) != {}:
+            logger.info("Images have the same geometry, comparing file sizes")
+            if get_file_size(file1) > get_file_size(file2):
+                return file2
+            else:
+                return file1
+        else:
+            return None
 
     def move_file(self, src, dst):
         def add_index_to_filename(filename, index):
@@ -219,28 +266,42 @@ class App():
             # If dst doesn't exist just move src to dst
             logger.info('MV %s -> %s', src, dst)
             shutil.move(src, dst)
-        elif self.get_file_hash(src) == self.get_file_hash(dst):
+        elif get_file_hash(src) == get_file_hash(dst):
             # If it exists and it's the same file - remove src
             logger.info('RM %s' % src)
             os.remove(src)
         else:
-            # If both are exist and differ - move with a different name
-            i = 2
-            while os.path.exists(add_index_to_filename(dst, i)):
-                i += 1
-            logger.info('MV %s -> %s', src, add_index_to_filename(dst, i))
-            shutil.move(src, add_index_to_filename(dst, i))
+            # If both are exist and differ - check their perceptual hashes
+            # and sizes, maybe we can determine which one is better, if not -
+            # we move with a different name
+            remove = self.get_remove_candidate(src, dst)
+
+            if remove is not None:
+                logger.warning("Removing duplicate image")
+                logger.warning("RM %s", remove)
+                os.remove(remove)
+                if remove == dst:
+                    logger.info('MV %s -> %s', src, dst)
+                    shutil.move(src, dst)    
+            else:
+                # Move it with a different name
+                i = 2
+                while os.path.exists(add_index_to_filename(dst, i)):
+                    i += 1
+                logger.info('MV %s -> %s', src, add_index_to_filename(dst, i))
+                shutil.move(src, add_index_to_filename(dst, i))
 
     def get_path_description(self, filename, exif):
         if self.get_make(exif) is not None and self.get_model(exif) is not None:
             full_device_name = '%s %s' % (self.get_make(exif), self.get_model(exif))
             return self.get_device_name(full_device_name)
         elif exif == {} or exif is None:
-            if filename.split('.')[-1] in ('mov', 'mp4', 'webm'):
+            if filename.split('.')[-1].lower() in ('mov', 'mp4', 'webm'):
                 return 'Videos'
             else:
                 return ''
 
+        logger.error("Could not get path description")
         return ''
 
     def get_new_basename(self, datetime, filename):
@@ -258,6 +319,7 @@ class App():
         return '%s_%s.%s' % (datetime.strftime('%Y%m%d'), time_part, ext)
 
     def process_file(self, filename):
+        logger.info("Processing file %s", filename)
         exif = self.get_exif(filename)
         logger.debug(exif)
         datetime = self.get_datetime(filename, exif)
@@ -270,7 +332,12 @@ class App():
 
         time_interval = self.get_time_interval(datetime)
         description = self.get_path_description(filename ,exif)
-        dst_path = '%s - %s' % (time_interval, description)
+
+        if description != '':
+            dst_path = '%s - %s' % (time_interval, description)
+        else:
+            dst_path = time_interval
+
         dst_full_path = os.path.join(self.args.dst, datetime.strftime('%Y'), dst_path)
 
         if not os.path.exists(dst_full_path) and not self.args.test:
