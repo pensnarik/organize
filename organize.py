@@ -259,9 +259,6 @@ class App():
             return None
 
     def move_file(self, src, dst):
-        def add_index_to_filename(filename, index):
-            return re.sub('(\.)([^\.]+)$', r'__%0.4d.\2' % index, filename)
-
         if not os.path.exists(dst):
             # If dst doesn't exist just move src to dst
             logger.info('MV %s -> %s', src, dst)
@@ -285,11 +282,7 @@ class App():
                     shutil.move(src, dst)    
             else:
                 # Move it with a different name
-                i = 2
-                while os.path.exists(add_index_to_filename(dst, i)):
-                    i += 1
-                logger.info('MV %s -> %s', src, add_index_to_filename(dst, i))
-                shutil.move(src, add_index_to_filename(dst, i))
+                safe_move(src, dst)
 
     def get_path_description(self, filename, exif):
         if self.get_make(exif) is not None and self.get_model(exif) is not None:
